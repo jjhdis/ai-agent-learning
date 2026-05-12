@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile agent/tools/base.py)",
+      "Bash(python -m py_compile agent/tools/registry.py)",
+      "Bash(python -m py_compile agent/tools/weather.py)",
+      "Bash(python -m py_compile agent/llm/client.py)",
+      "Bash(python -m py_compile agent/core/agent.py)"
+    ]
+  }
+}
