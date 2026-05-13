@@ -15,12 +15,13 @@ Agent 核心引擎 —— ReAct（Reasoning + Acting）循环。
 import json
 from typing import Callable
 
+from agent.chain.runnable import Runnable
 from agent.llm.client import LLMClient
 from agent.tools.registry import ToolRegistry
 
 
-class Agent:
-    """可扩展的 AI Agent。
+class Agent(Runnable):
+    """可扩展的 AI Agent，实现 Runnable 协议。
 
     Parameters:
         llm_client: LLM 客户端
@@ -104,6 +105,9 @@ class Agent:
         print(f"\n[Agent] ✗ 已达到最大推理步数 ({self.max_iterations})，强制结束")
         return "已达到最大推理步数，请简化问题后重试。"
 
+    def invoke(self, user_message: str) -> str:
+        """Runnable 协议接口，与 run() 等价。"""
+        return self.run(user_message)
 
     def reset(self) -> None:
         """清空对话历史。"""
