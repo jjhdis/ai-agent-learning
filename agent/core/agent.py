@@ -10,6 +10,7 @@ Agent 核心引擎 —— ReAct（Reasoning + Acting）循环。
     - 新增工具: 实现 BaseTool → 注册到 ToolRegistry → Agent 自动感知
     - 替换模型: 修改 Config.llm，无需改动 Agent 代码
     - 交互模式: 继承 Agent 重写 on_start / on_think / on_tool_call / on_reply 钩子
+    - 跨轮记忆: 注入 BaseMemory 实例，Agent 自动在 run() 前后加载/保存历史
 """
 
 import json
@@ -18,6 +19,7 @@ from typing import Callable
 from agent.chain.runnable import Runnable
 from agent.llm.client import LLMClient
 from agent.tools.registry import ToolRegistry
+from agent.memory.base import BaseMemory
 
 
 class Agent(Runnable):
@@ -28,6 +30,7 @@ class Agent(Runnable):
         registry: 工具注册中心
         max_iterations: 单次请求最多调用工具的次数（防止无限循环）
         hooks: 可选的生命周期回调
+        memory: 可选的对话记忆，为 None 时历史仅在单次 run() 内有效
     """
 
     def __init__(
@@ -36,11 +39,13 @@ class Agent(Runnable):
         registry: ToolRegistry,
         max_iterations: int = 5,
         hooks: dict[str, Callable] = None,
+        memory: BaseMemory = None,
     ):
         self.llm = llm_client
         self.registry = registry
         self.max_iterations = max_iterations
         self.hooks = hooks or {}
+        self.memory = memory
         self.history: list[dict] = []
 
     # ---- 公共 ----
@@ -51,6 +56,10 @@ class Agent(Runnable):
         print(f"[Agent] 收到用户消息: {user_message}")
         print(f"{'='*60}\n")
         self._emit("on_start", user_message)
+
+        if self.memory:
+            self.history = self.memory.load()
+            print(f"[Agent] 从记忆加载 {len(self.history)} 条历史消息")
 
         self.history.append({"role": "user", "content": user_message})
         tools = self.registry.get_openai_definitions()
@@ -93,6 +102,8 @@ class Agent(Runnable):
                 print(f"\n[Agent] ✓ LLM 给出最终回复，结束循环")
                 self.history.append({"role": "assistant", "content": msg.content})
                 self._emit("on_reply", msg.content)
+                if self.memory:
+                    self.memory.save(self.history)
                 print(f"[Agent] 最终回复: {msg.content[:200]}")
                 print(f"{'='*60}\n")
                 return msg.content
@@ -103,6 +114,8 @@ class Agent(Runnable):
             self._handle_tool_calls(msg.tool_calls)
 
         print(f"\n[Agent] ✗ 已达到最大推理步数 ({self.max_iterations})，强制结束")
+        if self.memory:
+            self.memory.save(self.history)
         return "已达到最大推理步数，请简化问题后重试。"
 
     def invoke(self, user_message: str) -> str:
@@ -110,8 +123,10 @@ class Agent(Runnable):
         return self.run(user_message)
 
     def reset(self) -> None:
-        """清空对话历史。"""
+        """清空对话历史和记忆。"""
         self.history.clear()
+        if self.memory:
+            self.memory.clear()
 
     # ---- 私有 ----
 
