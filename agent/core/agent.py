@@ -11,6 +11,7 @@ Agent 核心引擎 —— ReAct（Reasoning + Acting）循环。
     - 替换模型: 修改 Config.llm，无需改动 Agent 代码
     - 交互模式: 继承 Agent 重写 on_start / on_think / on_tool_call / on_reply 钩子
     - 跨轮记忆: 注入 BaseMemory 实例，Agent 自动在 run() 前后加载/保存历史
+    - 回调监听: 注入 CallbackManager + 自定义 BaseCallbackHandler，监听所有生命周期事件
 """
 
 import json
@@ -20,6 +21,31 @@ from agent.chain.runnable import Runnable
 from agent.llm.client import LLMClient
 from agent.tools.registry import ToolRegistry
 from agent.memory.base import BaseMemory
+from agent.callback.base import BaseCallbackHandler
+from agent.callback.manager import CallbackManager
+
+
+class _HooksAdapter(BaseCallbackHandler):
+    """将旧版 hooks 字典适配为 BaseCallbackHandler，保证向后兼容。"""
+
+    def __init__(self, hooks: dict[str, Callable]):
+        self._hooks = hooks
+
+    def on_agent_start(self, message: str) -> None:
+        if fn := self._hooks.get("on_start"):
+            fn(message)
+
+    def on_think(self, content: str) -> None:
+        if fn := self._hooks.get("on_think"):
+            fn(content)
+
+    def on_tool_start(self, name: str, args: dict) -> None:
+        if fn := self._hooks.get("on_tool_call"):
+            fn(name, args)
+
+    def on_agent_end(self, reply: str) -> None:
+        if fn := self._hooks.get("on_reply"):
+            fn(reply)
 
 
 class Agent(Runnable):
@@ -29,7 +55,8 @@ class Agent(Runnable):
         llm_client: LLM 客户端
         registry: 工具注册中心
         max_iterations: 单次请求最多调用工具的次数（防止无限循环）
-        hooks: 可选的生命周期回调
+        hooks: [已废弃] 旧版生命周期回调字典，请改用 callbacks 参数
+        callbacks: CallbackManager 实例，管理一组回调处理器
         memory: 可选的对话记忆，为 None 时历史仅在单次 run() 内有效
     """
 
@@ -39,14 +66,18 @@ class Agent(Runnable):
         registry: ToolRegistry,
         max_iterations: int = 5,
         hooks: dict[str, Callable] = None,
+        callbacks: CallbackManager = None,
         memory: BaseMemory = None,
     ):
         self.llm = llm_client
         self.registry = registry
         self.max_iterations = max_iterations
-        self.hooks = hooks or {}
         self.memory = memory
         self.history: list[dict] = []
+
+        self.callbacks = callbacks or CallbackManager()
+        if hooks:
+            self.callbacks.add_handler(_HooksAdapter(hooks))
 
     # ---- 公共 ----
 
@@ -55,7 +86,7 @@ class Agent(Runnable):
         print(f"\n{'='*60}")
         print(f"[Agent] 收到用户消息: {user_message}")
         print(f"{'='*60}\n")
-        self._emit("on_start", user_message)
+        self.callbacks.on_agent_start(user_message)
 
         if self.memory:
             self.history = self.memory.load()
@@ -81,7 +112,17 @@ class Agent(Runnable):
                 print(f"         [{i}] {role}: {content_preview}")
             print(f"[Agent] >>> 可用工具定义: {[t['function']['name'] for t in tools] if tools else '无'}")
 
-            msg = self.llm.chat(self.history, tools if tools else None)
+            self.callbacks.on_llm_start(self.history, tools if tools else None)
+
+            try:
+                response = self.llm.chat(self.history, tools if tools else None)
+            except Exception as e:
+                self.callbacks.on_llm_error(e)
+                self.callbacks.on_agent_error(e)
+                raise
+
+            msg = response.choices[0].message
+            self.callbacks.on_llm_end(response)
 
             print(f"\n[Agent] <<< LLM 返回:")
             if msg.content:
@@ -95,13 +136,13 @@ class Agent(Runnable):
                 print(f"         tool_calls: (无)")
 
             if msg.content:
-                self._emit("on_think", msg.content)
+                self.callbacks.on_think(msg.content)
 
             if not msg.tool_calls:
                 # LLM 给出最终文本回复
                 print(f"\n[Agent] ✓ LLM 给出最终回复，结束循环")
                 self.history.append({"role": "assistant", "content": msg.content})
-                self._emit("on_reply", msg.content)
+                self.callbacks.on_agent_end(msg.content)
                 if self.memory:
                     self.memory.save(self.history)
                 print(f"[Agent] 最终回复: {msg.content[:200]}")
@@ -140,11 +181,18 @@ class Agent(Runnable):
             else:
                 try:
                     args = json.loads(tc.function.arguments)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
                     content = f"[错误] 参数解析失败: {tc.function.arguments}"
+                    self.callbacks.on_tool_error(tc.function.name, e)
                 else:
-                    self._emit("on_tool_call", tool.name, args)
-                    content = tool.execute(**args)
+                    self.callbacks.on_tool_start(tool.name, args)
+                    try:
+                        content = tool.execute(**args)
+                    except Exception as e:
+                        content = f"[错误] 工具执行失败: {e}"
+                        self.callbacks.on_tool_error(tool.name, e)
+                    else:
+                        self.callbacks.on_tool_end(tool.name, content)
 
             results.append({
                 "role": "tool",
@@ -154,7 +202,16 @@ class Agent(Runnable):
 
         self.history.extend(results)
 
-    def _emit(self, event: str, *args) -> None:
-        """触发钩子回调。"""
-        if fn := self.hooks.get(event):
-            fn(*args)
+
+# ══════════════════════════════════════════════════════════════════════
+# 以下为旧版 hooks 字典 + _emit() 方法的代码，已被 CallbackManager 替代。
+# ══════════════════════════════════════════════════════════════════════
+
+#     # 旧版 __init__ 参数:
+#     #     hooks: dict[str, Callable] = None,
+#     #     self.hooks = hooks or {}
+#
+#     def _emit(self, event: str, *args) -> None:
+#         """[已废弃] 触发钩子回调。请使用 CallbackManager 替代。"""
+#         if fn := self.hooks.get(event):
+#             fn(*args)

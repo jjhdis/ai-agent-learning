@@ -19,9 +19,12 @@ class LLMClient:
 
     def chat(self, messages: list[dict], tools: list[dict] = None):
         """
-        发送对话请求，返回 OpenAI ChatCompletionMessage。
+        发送对话请求，返回 OpenAI ChatCompletion 完整响应。
 
-        调用方通过返回消息中的 tool_calls / content 判读下一步行为。
+        返回完整响应对象（包含 usage 信息），调用方可通过 .choices[0].message
+        获取消息内容，通过 .usage 获取 Token 消耗统计。
+
+        兼容旧代码：msg.content / msg.tool_calls / msg.model_dump() 仍可正常使用。
         """
         kwargs = dict(
             model=self.config.model,
@@ -33,4 +36,4 @@ class LLMClient:
             kwargs["tools"] = tools
 
         response = self._client.chat.completions.create(**kwargs)
-        return response.choices[0].message
+        return response

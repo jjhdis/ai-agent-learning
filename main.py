@@ -15,6 +15,7 @@ AI Agent 入口 —— 交互式对话。
     /memory summary 切换到摘要记忆模式
     /memory off     关闭记忆
     /demo-memory    运行记忆系统演示
+    /demo-callback  运行回调系统演示
 """
 
 import sys
@@ -27,14 +28,17 @@ from agent.core.agent import Agent
 from agent.memory.buffer import ConversationBufferMemory
 from agent.memory.window import ConversationBufferWindowMemory
 from agent.memory.summary import ConversationSummaryMemory
+from agent.callback.manager import CallbackManager
+from agent.callback.logging import LoggingCallback
+from agent.callback.token_counting import TokenCountingCallback
 
 
 # ──────────────────────────────────────────────
 # 组装
 # ──────────────────────────────────────────────
 
-def build_agent(memory=None):
-    """组装 Agent：配置 LLM + 注册工具 + 可选记忆。"""
+def build_agent(memory=None, callbacks=None):
+    """组装 Agent：配置 LLM + 注册工具 + 可选记忆 + 可选回调。"""
     llm = LLMClient(Config.llm)
     registry = ToolRegistry()
     registry.register(WeatherTool())
@@ -48,6 +52,7 @@ def build_agent(memory=None):
             "on_tool_call": lambda name, args: print(f"[Tool] 调用工具: {name}({args})"),
             "on_reply": lambda msg: print(f"[AI]: {msg}"),
         },
+        callbacks=callbacks,
     )
 
 
@@ -84,6 +89,65 @@ def demo_memory(agent_base):
 
 
 # ──────────────────────────────────────────────
+# 回调系统演示
+# ──────────────────────────────────────────────
+
+def demo_callback(agent_base):
+    """演示回调系统：展示 LoggingCallback 记录的所有生命周期事件。"""
+    print("\n" + "=" * 60)
+    print("回调系统演示 —— 生命周期事件追踪")
+    print("=" * 60)
+
+    callbacks = CallbackManager()
+    callbacks.add_handler(LoggingCallback(verbose=True))
+
+    agent = build_agent(memory=None, callbacks=callbacks)
+    print("\n[说明] LoggingCallback 将记录以下事件:")
+    print("  on_agent_start → on_llm_start → on_llm_end → on_think")
+    print("  → on_tool_start → on_tool_end → on_llm_start → on_llm_end")
+    print("  → on_agent_end（含耗时统计）")
+    print()
+
+    agent.run("上海今天天气怎么样？")
+
+    print("\n[统计]")
+    print(f"  LLM 调用次数: {callbacks.handlers[0].llm_call_count}")
+    print(f"  工具调用次数: {callbacks.handlers[0].tool_call_count}")
+    print(f"  总耗时: {callbacks.handlers[0].elapsed:.2f}s")
+
+
+# ──────────────────────────────────────────────
+# Token 计数演示
+# ──────────────────────────────────────────────
+
+def demo_token():
+    """演示 TokenCountingCallback：展示每次 LLM 调用的 Token 消耗和预估费用。"""
+    print("\n" + "=" * 60)
+    print("Token 计数演示 —— 统计每次 LLM 调用的 Token 消耗")
+    print("=" * 60)
+
+    callbacks = CallbackManager()
+    callbacks.add_handler(TokenCountingCallback(verbose=True))
+
+    agent = build_agent(memory=None, callbacks=callbacks)
+    print("\n[说明] TokenCountingCallback 将记录每次 LLM 调用的 Token 数:")
+    print("  on_llm_end → 提取 usage.prompt_tokens / completion_tokens / total_tokens")
+    print("  on_agent_end → 汇总统计 + 预估费用")
+    print()
+
+    agent.run("上海今天天气怎么样？")
+
+    counter = callbacks.handlers[0]
+    print("\n[详细统计]")
+    print(f"  模型: {counter._actual_model}")
+    print(f"  LLM 调用次数: {counter.llm_call_count}")
+    print(f"  输入 Token:   {counter.prompt_tokens:,}")
+    print(f"  输出 Token:   {counter.completion_tokens:,}")
+    print(f"  总 Token:     {counter.total_tokens:,}")
+    print(f"  预估费用:     ¥{counter.estimated_cost:.6f}")
+
+
+# ──────────────────────────────────────────────
 # 主入口
 # ──────────────────────────────────────────────
 
@@ -96,7 +160,7 @@ def main():
     print(f"   模型: {Config.llm.model}")
     print(f"   工具: 天气查询 (get_weather)")
     print(f"   记忆: {memory_label}")
-    print(f"   输入 /quit 退出, /reset 清空, /demo-memory 演示, /memory 切换记忆模式")
+    print(f"   输入 /quit 退出, /reset 清空, /demo-memory 演示记忆, /demo-callback 演示回调, /demo-token 演示Token计数, /memory 切换记忆模式")
     print("=" * 50)
 
     agent = build_agent(memory=memory)
@@ -119,6 +183,12 @@ def main():
             continue
         if user_input.lower() == "/demo-memory":
             demo_memory(agent)
+            continue
+        if user_input.lower() == "/demo-callback":
+            demo_callback(agent)
+            continue
+        if user_input.lower() == "/demo-token":
+            demo_token()
             continue
         if user_input.lower().startswith("/memory"):
             parts = user_input.split(maxsplit=1)
