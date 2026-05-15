@@ -10,10 +10,20 @@ from agent.memory.summary import ConversationSummaryMemory
 from agent.callback.base import BaseCallbackHandler
 from agent.callback.manager import CallbackManager
 from agent.callback.logging import LoggingCallback
+from agent.prompt.base import PromptTemplate
+from agent.prompt.chat import ChatPromptTemplate
+from agent.prompt.placeholder import MessagePlaceholder
+from agent.prompt.few_shot import (
+    BaseExampleSelector,
+    LengthBasedExampleSelector,
+    FewShotPromptTemplate,
+)
 
 __all__ = [
     "Agent", "ToolRegistry", "BaseTool", "ToolParameter",
     "Runnable", "RunnableSequence", "RunnablePassthrough", "RunnableMap", "RunnableLambda",
     "BaseMemory", "ConversationBufferMemory", "ConversationBufferWindowMemory", "ConversationSummaryMemory",
     "BaseCallbackHandler", "CallbackManager", "LoggingCallback",
+    "PromptTemplate", "ChatPromptTemplate", "MessagePlaceholder",
+    "BaseExampleSelector", "LengthBasedExampleSelector", "FewShotPromptTemplate",
 ]

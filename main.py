@@ -15,7 +15,7 @@ AI Agent 入口 —— 交互式对话。
     /memory summary 切换到摘要记忆模式
     /memory off     关闭记忆
     /demo-memory    运行记忆系统演示
-    /demo-callback  运行回调系统演示
+    /demo-prompt    运行提示词模板系统演示
 """
 
 import sys
@@ -31,6 +31,13 @@ from agent.memory.summary import ConversationSummaryMemory
 from agent.callback.manager import CallbackManager
 from agent.callback.logging import LoggingCallback
 from agent.callback.token_counting import TokenCountingCallback
+from agent.prompt.base import PromptTemplate
+from agent.prompt.chat import ChatPromptTemplate
+from agent.prompt.placeholder import MessagePlaceholder
+from agent.prompt.few_shot import (
+    LengthBasedExampleSelector,
+    FewShotPromptTemplate,
+)
 
 
 # ──────────────────────────────────────────────
@@ -148,8 +155,178 @@ def demo_token():
 
 
 # ──────────────────────────────────────────────
-# 主入口
+# 提示词模板演示
 # ──────────────────────────────────────────────
+
+def demo_prompt():
+    """演示提示词模板系统：PromptTemplate / ChatPromptTemplate / Few-Shot / MessagePlaceholder。"""
+    print("\n" + "=" * 60)
+    print("提示词模板系统演示 —— Prompt Template")
+    print("=" * 60)
+
+    # ── 1. PromptTemplate 基础 ──
+    print("\n" + "─" * 50)
+    print("1. PromptTemplate —— 字符串模板变量替换")
+    print("─" * 50)
+
+    tpl = PromptTemplate("你好，{name}！今天是{date}，{city}天气怎么样？")
+    result = tpl.format(name="小明", date="2026-05-15", city="上海")
+    print(f"   模板: {tpl!r}")
+    print(f"   变量: {tpl.input_variables}")
+    print(f"   结果: {result}")
+
+    # ── 2. partial() 部分变量绑定 ──
+    print("\n" + "─" * 50)
+    print("2. partial() —— 预设部分变量，延迟填充")
+    print("─" * 50)
+
+    base_tpl = PromptTemplate("城市: {city}, 日期: {date}, 用户: {user}")
+    pre_tpl = base_tpl.partial(date="2026-05-15", user="测试员")
+    print(f"   基础模板: {base_tpl.input_variables}")
+    print(f"   预设变量后: 剩余变量 = {pre_tpl.input_variables}")
+    print(f"   最终填充: {pre_tpl.format(city='北京')}")
+
+    # ── 3. PromptTemplate 作为 Runnable ──
+    print("\n" + "─" * 50)
+    print("3. Runnable 协议 —— 模板作为管道组件")
+    print("─" * 50)
+
+    from agent.chain.passthrough import RunnableLambda
+
+    tpl = PromptTemplate("分析以下内容:\n{input}\n\n请给出摘要。")
+    pipeline = RunnableLambda(lambda x: x.strip()) | tpl
+    final = pipeline.invoke("  这是一段需要分析的文本。  ")
+    print(f"   管道: StripText | PromptTemplate")
+    print(f"   输入: '  这是一段需要分析的文本。  '")
+    print(f"   输出: {final[:60]}...")
+
+    # ── 4. ChatPromptTemplate ──
+    print("\n" + "─" * 50)
+    print("4. ChatPromptTemplate —— 多角色对话模板")
+    print("─" * 50)
+
+    chat_tpl = ChatPromptTemplate.from_messages([
+        ("system", "你是一个{role}助手，擅长{skill}。回答风格：{style}。"),
+        ("user", "{input}"),
+    ])
+    msgs = chat_tpl.format_messages(
+        role="天气",
+        skill="气象预报",
+        style="简洁明了",
+        input="上海今天天气怎么样？",
+    )
+    print(f"   模板消息数: {len(chat_tpl._messages)}")
+    print(f"   生成的对话消息:")
+    for m in msgs:
+        role = m["role"]
+        content_preview = m["content"][:80]
+        print(f"      [{role}]: {content_preview}")
+
+    # ── 5. MessagePlaceholder ──
+    print("\n" + "─" * 50)
+    print("5. MessagePlaceholder —— 运行时插入对话历史")
+    print("─" * 50)
+
+    history_placeholder = MessagePlaceholder("history")
+    tpl_with_history = ChatPromptTemplate([
+        ("system", "你是一个{role}助手"),
+        history_placeholder,
+        ("user", "{input}"),
+    ])
+
+    fake_history = [
+        {"role": "user", "content": "你好"},
+        {"role": "assistant", "content": "你好！有什么可以帮你的？"},
+        {"role": "user", "content": "今天天气怎么样？"},
+        {"role": "assistant", "content": "你想知道哪个城市的天气？"},
+    ]
+
+    msgs = tpl_with_history.format_messages(
+        role="天气",
+        input="上海呢？",
+        history=fake_history,
+    )
+    print(f"   占位符: {history_placeholder!r}")
+    print(f"   生成的消息列表 (共 {len(msgs)} 条):")
+    for i, m in enumerate(msgs):
+        role = m["role"]
+        content_preview = m["content"][:60]
+        print(f"      [{i}] {role}: {content_preview}")
+
+    # ── 6. Few-Shot 示例选择 ──
+    print("\n" + "─" * 50)
+    print("6. FewShotPromptTemplate —— 动态示例选择")
+    print("─" * 50)
+
+    selector = LengthBasedExampleSelector(
+        examples=[
+            {"input": "北京天气怎么样？", "answer": "北京今天晴，25°C，建议穿薄外套。"},
+            {"input": "上海天气怎么样？", "answer": "上海今天多云，28°C，湿度较大。"},
+            {"input": "广州天气怎么样？", "answer": "广州今天有雨，30°C，记得带伞。"},
+            {"input": "哈尔滨天气怎么样？", "answer": "哈尔滨下雪，-5°C，注意保暖！"},
+            {"input": "三亚天气怎么样？", "answer": "三亚晴，32°C，适合游泳和潜水。"},
+        ],
+        example_prompt=PromptTemplate("问题: {input}\n回答: {answer}"),
+        max_tokens=200,
+    )
+
+    few_shot = FewShotPromptTemplate(
+        example_selector=selector,
+        example_prompt=PromptTemplate("问题: {input}\n回答: {answer}"),
+        prefix="以下是一些天气查询的示例:\n",
+        suffix="\n\n现在请回答: {input}",
+        example_separator="\n\n",
+    )
+
+    # 模拟对 "南方城市" 的查询，选择器会优先选取最近的示例
+    prompt = few_shot.format(input="深圳天气怎么样？")
+    selected_count = len(selector.select_examples({"input": "深圳天气怎么样？"}))
+    print(f"   示例池: {len(selector._examples)} 个")
+    print(f"   本次选中: {selected_count} 个 (max_tokens={selector.max_tokens})")
+    print(f"   生成的提示词 ({len(prompt)} 字符):")
+    print(f"   {'─'*40}")
+    for line in prompt.split("\n"):
+        print(f"   | {line}")
+    print(f"   {'─'*40}")
+
+    # 演示添加新示例
+    selector.add_example({"input": "深圳天气怎么样？", "answer": "深圳晴，29°C，建议防晒。"})
+    print(f"\n   添加新示例后，示例池: {len(selector._examples)} 个")
+
+    # ── 7. 综合演示：模板 + Agent ──
+    print("\n" + "─" * 50)
+    print("7. 综合演示 —— 用模板构建 Agent 的 System Prompt")
+    print("─" * 50)
+
+    system_tpl = PromptTemplate(
+        "你是一个{role}助手。你的说话风格是{style}。"
+        "当前日期是{date}。你的名字叫{name}。"
+    )
+    system_msg = system_tpl.format(
+        role="天气预报",
+        style="活泼风趣",
+        date="2026-05-15",
+        name="小天气",
+    )
+    print(f"   生成的 System Prompt: {system_msg}")
+
+    # ── 8. 模板异常处理 ──
+    print("\n" + "─" * 50)
+    print("8. 异常处理 —— 缺少变量时的友好提示")
+    print("─" * 50)
+
+    try:
+        PromptTemplate("你好，{name}！今天{city}天气怎么样？").format(name="小明")
+    except KeyError as e:
+        print(f"   缺少变量时抛出: {e}")
+
+    # 使用 partial 避免异常
+    safe_tpl = PromptTemplate("你好，{name}！今天{city}天气怎么样？").partial(city="默认城市")
+    print(f"   使用 partial 兜底后: {safe_tpl.format(name='小明')}")
+
+    print("\n" + "=" * 60)
+    print("提示词模板系统演示完成！")
+    print("=" * 60)
 
 def main():
     memory = ConversationBufferMemory()
@@ -160,7 +337,7 @@ def main():
     print(f"   模型: {Config.llm.model}")
     print(f"   工具: 天气查询 (get_weather)")
     print(f"   记忆: {memory_label}")
-    print(f"   输入 /quit 退出, /reset 清空, /demo-memory 演示记忆, /demo-callback 演示回调, /demo-token 演示Token计数, /memory 切换记忆模式")
+    print(f"   输入 /quit 退出, /reset 清空, /demo-memory 演示记忆, /demo-callback 演示回调, /demo-token 演示Token计数, /demo-prompt 演示模板, /memory 切换记忆模式")
     print("=" * 50)
 
     agent = build_agent(memory=memory)
@@ -189,6 +366,9 @@ def main():
             continue
         if user_input.lower() == "/demo-token":
             demo_token()
+            continue
+        if user_input.lower() == "/demo-prompt":
+            demo_prompt()
             continue
         if user_input.lower().startswith("/memory"):
             parts = user_input.split(maxsplit=1)

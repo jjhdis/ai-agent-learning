@@ -11,7 +11,9 @@
       "Bash(python -m py_compile agent/memory/window.py)",
       "Bash(python -m py_compile agent/memory/summary.py)",
       "Bash(python -m py_compile main.py)",
-      "Bash(python -c \"from agent.memory.base import BaseMemory; from agent.memory.buffer import ConversationBufferMemory; from agent.memory.window import ConversationBufferWindowMemory; from agent.memory.summary import ConversationSummaryMemory; print\\('All memory imports OK'\\); from agent.core.agent import Agent; print\\('Agent import OK'\\); print\\('All imports successful!'\\)\")"
+      "Bash(python -c \"from agent.memory.base import BaseMemory; from agent.memory.buffer import ConversationBufferMemory; from agent.memory.window import ConversationBufferWindowMemory; from agent.memory.summary import ConversationSummaryMemory; print\\('All memory imports OK'\\); from agent.core.agent import Agent; print\\('Agent import OK'\\); print\\('All imports successful!'\\)\")",
+      "Bash(python -c \"from agent.prompt import PromptTemplate, ChatPromptTemplate, MessagePlaceholder, LengthBasedExampleSelector, FewShotPromptTemplate; print\\('All imports OK'\\)\")",
+      "Bash(python -c ' *)"
     ]
   }
 }
