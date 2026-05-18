@@ -12,6 +12,7 @@ Agent 核心引擎 —— ReAct（Reasoning + Acting）循环。
     - 交互模式: 继承 Agent 重写 on_start / on_think / on_tool_call / on_reply 钩子
     - 跨轮记忆: 注入 BaseMemory 实例，Agent 自动在 run() 前后加载/保存历史
     - 回调监听: 注入 CallbackManager + 自定义 BaseCallbackHandler，监听所有生命周期事件
+    - 输出解析: 注入 BaseOutputParser 实例，自动将 LLM 文本输出解析为结构化数据
 """
 
 import json
@@ -23,6 +24,8 @@ from agent.tools.registry import ToolRegistry
 from agent.memory.base import BaseMemory
 from agent.callback.base import BaseCallbackHandler
 from agent.callback.manager import CallbackManager
+from agent.output_parsers.base import BaseOutputParser
+from agent.output_parsers.str_parser import StrOutputParser
 
 
 class _HooksAdapter(BaseCallbackHandler):
@@ -58,6 +61,8 @@ class Agent(Runnable):
         hooks: [已废弃] 旧版生命周期回调字典，请改用 callbacks 参数
         callbacks: CallbackManager 实例，管理一组回调处理器
         memory: 可选的对话记忆，为 None 时历史仅在单次 run() 内有效
+        output_parser: 输出解析器，用于将 LLM 文本回复转换为结构化数据。
+                       默认为 StrOutputParser()，原样返回字符串。
     """
 
     def __init__(
@@ -68,12 +73,14 @@ class Agent(Runnable):
         hooks: dict[str, Callable] = None,
         callbacks: CallbackManager = None,
         memory: BaseMemory = None,
+        output_parser: BaseOutputParser = None,
     ):
         self.llm = llm_client
         self.registry = registry
         self.max_iterations = max_iterations
         self.memory = memory
         self.history: list[dict] = []
+        self.output_parser = output_parser or StrOutputParser()
 
         self.callbacks = callbacks or CallbackManager()
         if hooks:
@@ -81,8 +88,8 @@ class Agent(Runnable):
 
     # ---- 公共 ----
 
-    def run(self, user_message: str) -> str:
-        """处理一条用户消息，返回 Agent 的最终文本回复。"""
+    def run(self, user_message: str):
+        """处理一条用户消息，返回解析后的结构化数据（默认字符串）。"""
         print(f"\n{'='*60}")
         print(f"[Agent] 收到用户消息: {user_message}")
         print(f"{'='*60}\n")
@@ -147,7 +154,9 @@ class Agent(Runnable):
                     self.memory.save(self.history)
                 print(f"[Agent] 最终回复: {msg.content[:200]}")
                 print(f"{'='*60}\n")
-                return msg.content
+                parsed = self.output_parser.parse(msg.content)
+                print(f"[Agent] 解析后结果类型: {type(parsed).__name__}")
+                return parsed
 
             # LLM 要求调用工具
             print(f"\n[Agent] → LLM 要求调用工具，准备执行...")

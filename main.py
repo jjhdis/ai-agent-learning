@@ -16,6 +16,7 @@ AI Agent 入口 —— 交互式对话。
     /memory off     关闭记忆
     /demo-memory    运行记忆系统演示
     /demo-prompt    运行提示词模板系统演示
+    /demo-parser    运行输出解析系统演示
 """
 
 import sys
@@ -38,14 +39,19 @@ from agent.prompt.few_shot import (
     LengthBasedExampleSelector,
     FewShotPromptTemplate,
 )
+from agent.output_parsers.str_parser import StrOutputParser
+from agent.output_parsers.json_parser import JsonOutputParser
+from agent.output_parsers.pydantic_parser import PydanticOutputParser
+from agent.output_parsers.list_parser import CommaSeparatedListOutputParser
+from agent.output_parsers.base import OutputParserException
 
 
 # ──────────────────────────────────────────────
 # 组装
 # ──────────────────────────────────────────────
 
-def build_agent(memory=None, callbacks=None):
-    """组装 Agent：配置 LLM + 注册工具 + 可选记忆 + 可选回调。"""
+def build_agent(memory=None, callbacks=None, output_parser=None):
+    """组装 Agent：配置 LLM + 注册工具 + 可选记忆 + 可选回调 + 可选输出解析器。"""
     llm = LLMClient(Config.llm)
     registry = ToolRegistry()
     registry.register(WeatherTool())
@@ -60,6 +66,7 @@ def build_agent(memory=None, callbacks=None):
             "on_reply": lambda msg: print(f"[AI]: {msg}"),
         },
         callbacks=callbacks,
+        output_parser=output_parser,
     )
 
 
@@ -328,6 +335,197 @@ def demo_prompt():
     print("提示词模板系统演示完成！")
     print("=" * 60)
 
+
+# ──────────────────────────────────────────────
+# 输出解析演示
+# ──────────────────────────────────────────────
+
+def demo_output_parsers(agent_base):
+    """演示输出解析系统：StrOutputParser / JsonOutputParser / PydanticOutputParser / CommaSeparatedListOutputParser。"""
+    print("\n" + "=" * 60)
+    print("输出解析系统演示 —— Output Parser")
+    print("=" * 60)
+
+    # ── 1. StrOutputParser —— 原样返回 ──
+    print("\n" + "─" * 50)
+    print("1. StrOutputParser —— 原样返回字符串")
+    print("─" * 50)
+
+    str_parser = StrOutputParser()
+    result = str_parser.parse("这是一段 LLM 回复文本")
+    print(f"   输入: '这是一段 LLM 回复文本'")
+    print(f"   输出: '{result}'")
+    print(f"   类型: {type(result).__name__}")
+
+    # ── 2. JsonOutputParser —— 解析 JSON ──
+    print("\n" + "─" * 50)
+    print("2. JsonOutputParser —— 智能提取并解析 JSON")
+    print("─" * 50)
+
+    json_parser = JsonOutputParser(expected_keys=["city", "temperature", "condition"])
+
+    # 演示格式说明
+    print("   [格式说明 (可追加到 System Prompt)]:")
+    instructions = json_parser.get_format_instructions()
+    for line in instructions.split("\n"):
+        print(f"   | {line}")
+
+    # 场景1: 纯 JSON
+    result = json_parser.parse('{"city": "上海", "temperature": 28.0, "condition": "晴"}')
+    print(f"\n   场景1 - 纯 JSON:")
+    print(f"     输入: '{{\"city\": \"上海\", \"temperature\": 28.0, \"condition\": \"晴\"}}'")
+    print(f"     输出: {result}")
+
+    # 场景2: JSON 嵌在文本中
+    result = json_parser.parse("好的，根据查询结果，上海的天气信息如下：{\"city\": \"北京\", \"temperature\": 22.5, \"condition\": \"多云\"}")
+    print(f"\n   场景2 - JSON 嵌在文本中:")
+    print(f"     输入: '好的，根据查询结果...{{\"city\": \"北京\"...}}'")
+    print(f"     输出: {result}")
+
+    # 场景3: Markdown 代码块
+    result = json_parser.parse('```json\n{"city": "广州", "temperature": 30.0, "condition": "雷阵雨"}\n```')
+    print(f"\n   场景3 - Markdown 代码块:")
+    print(f"     输入: '```json\\n...\\n```'")
+    print(f"     输出: {result}")
+
+    # ── 3. CommaSeparatedListOutputParser ──
+    print("\n" + "─" * 50)
+    print("3. CommaSeparatedListOutputParser —— 解析列表文本")
+    print("─" * 50)
+
+    list_parser = CommaSeparatedListOutputParser()
+
+    # 场景1: 逗号分隔
+    result = list_parser.parse("天气查询, 翻译, 计算器, 日程管理")
+    print(f"   场景1 - 逗号分隔: {result}")
+
+    # 场景2: 中文逗号
+    result = list_parser.parse("上海，北京，广州，深圳")
+    print(f"   场景2 - 中文逗号: {result}")
+
+    # 场景3: 编号列表
+    result = list_parser.parse("1. 查询天气\n2. 预订酒店\n3. 规划路线\n4. 推荐美食")
+    print(f"   场景3 - 编号列表: {result}")
+
+    # 场景4: JSON 数组
+    result = list_parser.parse('["数据分析", "机器学习", "深度学习", "NLP"]')
+    print(f"   场景4 - JSON 数组: {result}")
+
+    print(f"\n   [格式说明]:")
+    instructions = list_parser.get_format_instructions()
+    print(f"   {instructions}")
+
+    # ── 4. PydanticOutputParser ──
+    print("\n" + "─" * 50)
+    print("4. PydanticOutputParser —— 解析为 Pydantic 模型")
+    print("─" * 50)
+
+    try:
+        from pydantic import BaseModel, Field
+
+        class WeatherInfo(BaseModel):
+            """天气信息模型"""
+            city: str = Field(description="城市名称")
+            temperature: float = Field(description="温度（摄氏度）")
+            condition: str = Field(description="天气状况，如晴、多云、雨")
+
+        pydantic_parser = PydanticOutputParser(pydantic_object=WeatherInfo)
+
+        print("   [自动生成的格式说明 (从 Pydantic 模型推导)]:")
+        instructions = pydantic_parser.get_format_instructions()
+        for line in instructions.split("\n"):
+            print(f"   | {line}")
+
+        result = pydantic_parser.parse('{"city": "深圳", "temperature": 29.5, "condition": "晴间多云"}')
+        print(f"\n   解析结果: {result}")
+        print(f"   类型: {type(result).__name__}")
+        print(f"   访问字段: .city={result.city}, .temperature={result.temperature}°C, .condition={result.condition}")
+
+    except ImportError as e:
+        print(f"   [跳过] Pydantic 未安装，跳过 PydanticOutputParser 演示。")
+        print(f"   安装方法: pip install pydantic")
+
+    # ── 5. 输出解析器作为 Runnable 管道组件 ──
+    print("\n" + "─" * 50)
+    print("5. Runnable 协议 —— 解析器作为管道组件")
+    print("─" * 50)
+
+    from agent.chain.passthrough import RunnableLambda
+
+    # 模拟一个返回 JSON 字符串的步骤
+    mock_llm = RunnableLambda(lambda x: '{"city": "成都", "temperature": 24.0, "condition": "阴"}')
+
+    pipeline = mock_llm | JsonOutputParser(expected_keys=["city", "temperature", "condition"])
+    result = pipeline.invoke("成都天气怎么样？")
+    print(f"   管道: MockLLM | JsonOutputParser")
+    print(f"   输入: '成都天气怎么样？'")
+    print(f"   输出: {result}")
+    print(f"   类型: {type(result).__name__}")
+
+    # ── 6. Agent 集成演示 ──
+    print("\n" + "─" * 50)
+    print("6. Agent 集成 —— 带输出解析器的 Agent")
+    print("─" * 50)
+
+    json_agent = build_agent(output_parser=JsonOutputParser(
+        expected_keys=["city", "temperature", "condition", "summary"]
+    ))
+    print("   [创建了带 JsonOutputParser 的 Agent]")
+    print("   Agent 的最终回复将自动解析为 Python dict...")
+    result = json_agent.run(
+        "请以JSON格式告诉我上海今天的天气情况，"
+        "包含以下字段：city（城市）、temperature（温度）、"
+        "condition（天气状况）、summary（简短总结）。不要添加其他文字。"
+    )
+    print(f"\n   解析后结果类型: {type(result).__name__}")
+    print(f"   解析后数据:")
+    if isinstance(result, dict):
+        for key, value in result.items():
+            print(f"      {key}: {value}")
+    else:
+        print(f"      {result}")
+
+    # ── 7. 异常处理演示 ──
+    print("\n" + "─" * 50)
+    print("7. 异常处理 —— OutputParserException")
+    print("─" * 50)
+
+    parser = JsonOutputParser(expected_keys=["name", "age"])
+
+    # 正常解析
+    try:
+        result = parser.parse('{"name": "张三", "age": 25}')
+        print(f"   正常解析: {result}")
+    except OutputParserException as e:
+        print(f"   异常: {e}")
+
+    # 无法解析的文本
+    try:
+        result = parser.parse("这是一段完全不是 JSON 的文本，没有任何花括号")
+    except OutputParserException as e:
+        print(f"   解析失败: {e}")
+        print(f"   异常类型: {type(e).__name__}")
+        print(f"   携带原始文本前80字: {e.text[:80]}")
+
+    # ── 8. 综合对比 ──
+    print("\n" + "─" * 50)
+    print("8. 解析器对比总结")
+    print("─" * 50)
+
+    print(f"   {'解析器':<35} {'输入示例':<30} {'输出类型':<15}")
+    print(f"   {'─'*35} {'─'*30} {'─'*15}")
+    json_example = '{"key": "value"}'
+    pydantic_example = '{"city": "..."}'
+    print(f"   {'StrOutputParser':<35} {'任意文本':<30} {'str':<15}")
+    print(f"   {'JsonOutputParser':<35} {json_example:<30} {'dict':<15}")
+    print(f"   {'PydanticOutputParser':<35} {pydantic_example:<30} {'WeatherInfo':<15}")
+    print(f"   {'CommaSeparatedListOutputParser':<35} {'A, B, C':<30} {'list[str]':<15}")
+
+    print("\n" + "=" * 60)
+    print("输出解析系统演示完成！")
+    print("=" * 60)
+
+
 def main():
     memory = ConversationBufferMemory()
     memory_label = "完整记忆 (Buffer)"
@@ -337,7 +535,7 @@ def main():
     print(f"   模型: {Config.llm.model}")
     print(f"   工具: 天气查询 (get_weather)")
     print(f"   记忆: {memory_label}")
-    print(f"   输入 /quit 退出, /reset 清空, /demo-memory 演示记忆, /demo-callback 演示回调, /demo-token 演示Token计数, /demo-prompt 演示模板, /memory 切换记忆模式")
+    print(f"   输入 /quit 退出, /reset 清空, /demo-memory 演示记忆, /demo-callback 演示回调, /demo-token 演示Token计数, /demo-prompt 演示模板, /demo-parser 演示输出解析, /memory 切换记忆模式")
     print("=" * 50)
 
     agent = build_agent(memory=memory)
@@ -369,6 +567,9 @@ def main():
             continue
         if user_input.lower() == "/demo-prompt":
             demo_prompt()
+            continue
+        if user_input.lower() == "/demo-parser":
+            demo_output_parsers(agent)
             continue
         if user_input.lower().startswith("/memory"):
             parts = user_input.split(maxsplit=1)
