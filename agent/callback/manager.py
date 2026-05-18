@@ -69,6 +69,9 @@ class CallbackManager:
     def on_think(self, content: str) -> None:
         self._dispatch("on_think", content)
 
+    def on_llm_token(self, token: str, is_final: bool = False) -> None:
+        self._dispatch("on_llm_token", token, is_final)
+
     # ---- Tool 级事件 ----
 
     def on_tool_start(self, name: str, args: dict) -> None:

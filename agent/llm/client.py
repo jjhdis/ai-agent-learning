@@ -37,3 +37,38 @@ class LLMClient:
 
         response = self._client.chat.completions.create(**kwargs)
         return response
+
+    def stream_chat(self, messages: list[dict], tools: list[dict] = None):
+        """
+        流式对话请求，返回一个生成器，逐个产出 OpenAI ChatCompletionChunk。
+
+        每个 chunk 的 delta 包含增量内容:
+        - delta.content: 文本 token 片段
+        - delta.tool_calls: 工具调用分片（跨多个 chunk 到达）
+
+        使用方式:
+            for chunk in llm.stream_chat(messages, tools):
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    print(delta.content, end="", flush=True)
+
+        配合 StreamAccumulator 使用可自动重组完整消息:
+            acc = StreamAccumulator()
+            for chunk in llm.stream_chat(messages, tools):
+                acc.add_chunk(chunk)
+                for token in acc.new_tokens():
+                    yield token
+            msg = acc.build_message()
+        """
+        kwargs = dict(
+            model=self.config.model,
+            messages=messages,
+            temperature=self.config.temperature,
+            max_tokens=self.config.max_tokens,
+            stream=True,
+        )
+        if tools:
+            kwargs["tools"] = tools
+
+        response = self._client.chat.completions.create(**kwargs)
+        return response

@@ -26,6 +26,7 @@ from agent.callback.base import BaseCallbackHandler
 from agent.callback.manager import CallbackManager
 from agent.output_parsers.base import BaseOutputParser
 from agent.output_parsers.str_parser import StrOutputParser
+from agent.streaming.event import StreamEvent, StreamEventType, StreamAccumulator
 
 
 class _HooksAdapter(BaseCallbackHandler):
@@ -167,6 +168,159 @@ class Agent(Runnable):
         if self.memory:
             self.memory.save(self.history)
         return "已达到最大推理步数，请简化问题后重试。"
+
+    def run_stream(self, user_message: str):
+        """流式版本的 run()，逐 token 产出 StreamEvent。
+
+        与 run() 的 ReAct 循环逻辑一致，区别在于 LLM 调用使用 stream_chat()
+        并由 StreamAccumulator 将 delta 块重组为完整消息。
+
+        产出的事件类型:
+        - StreamEventType.THINK: 推理过程中的文本 token
+        - StreamEventType.REPLY: 最终回复的文本 token
+        - StreamEventType.TOOL_START: 工具开始执行
+        - StreamEventType.TOOL_END: 工具执行完成
+        - StreamEventType.TOOL_ERROR: 工具执行出错
+        - StreamEventType.DONE: 流式输出完成
+        - StreamEventType.ERROR: 发生错误
+
+        使用示例:
+            for event in agent.run_stream("上海天气"):
+                if event.event == StreamEventType.REPLY:
+                    print(event.data, end="", flush=True)
+                elif event.event == StreamEventType.THINK:
+                    print(f"[思考] {event.data}", end="")
+        """
+        self.callbacks.on_agent_start(user_message)
+
+        if self.memory:
+            self.history = self.memory.load()
+
+        self.history.append({"role": "user", "content": user_message})
+        tools = self.registry.get_openai_definitions()
+
+        for step in range(self.max_iterations):
+            self.callbacks.on_llm_start(self.history, tools if tools else None)
+
+            # 流式调用 LLM，用 StreamAccumulator 重组消息
+            accumulator = StreamAccumulator()
+            try:
+                for chunk in self.llm.stream_chat(self.history, tools if tools else None):
+                    accumulator.add_chunk(chunk)
+                    new_text = accumulator.new_tokens()
+                    if new_text:
+                        self.callbacks.on_llm_token(new_text, is_final=False)
+                        yield StreamEvent(
+                            event=StreamEventType.THINK,
+                            data=new_text,
+                            step=step,
+                        )
+            except Exception as e:
+                self.callbacks.on_llm_error(e)
+                yield StreamEvent(
+                    event=StreamEventType.ERROR,
+                    data=str(e),
+                    step=step,
+                )
+                return
+
+            self.callbacks.on_llm_end(None)
+
+            # 流式响应中包含思考文本
+            if accumulator.content:
+                self.callbacks.on_think(accumulator.content)
+
+            # 判断是否需要调用工具
+            if not accumulator.has_tool_calls:
+                # 最终回复 —— 重新流式输出，这次标记为 REPLY
+                self.history.append({"role": "assistant", "content": accumulator.content})
+                self.callbacks.on_agent_end(accumulator.content)
+                if self.memory:
+                    self.memory.save(self.history)
+
+                # 对完整回复逐字产出 REPLY 事件（模拟流式体验）
+                for char in accumulator.content:
+                    self.callbacks.on_llm_token(char, is_final=True)
+                    yield StreamEvent(
+                        event=StreamEventType.REPLY,
+                        data=char,
+                        step=step,
+                    )
+
+                parsed = self.output_parser.parse(accumulator.content)
+                yield StreamEvent(
+                    event=StreamEventType.DONE,
+                    data=parsed,
+                    step=step,
+                )
+                return
+
+            # LLM 要求调用工具
+            msg = accumulator.build_message()
+            self.history.append(msg)
+
+            for tc in accumulator.tool_calls:
+                tool = self.registry.get(tc["function"]["name"])
+                if not tool:
+                    error_msg = f"未知工具: {tc['function']['name']}"
+                    content = f"[错误] {error_msg}"
+                    yield StreamEvent(
+                        event=StreamEventType.TOOL_ERROR,
+                        data={"name": tc["function"]["name"], "error": error_msg},
+                        step=step,
+                    )
+                else:
+                    try:
+                        args = json.loads(tc["function"]["arguments"])
+                    except json.JSONDecodeError as e:
+                        error_msg = f"参数解析失败: {tc['function']['arguments']}"
+                        content = f"[错误] {error_msg}"
+                        self.callbacks.on_tool_error(tc["function"]["name"], e)
+                        yield StreamEvent(
+                            event=StreamEventType.TOOL_ERROR,
+                            data={"name": tc["function"]["name"], "error": str(e)},
+                            step=step,
+                        )
+                    else:
+                        self.callbacks.on_tool_start(tool.name, args)
+                        yield StreamEvent(
+                            event=StreamEventType.TOOL_START,
+                            data={"name": tool.name, "args": args},
+                            step=step,
+                        )
+                        try:
+                            content = tool.execute(**args)
+                        except Exception as e:
+                            content = f"[错误] 工具执行失败: {e}"
+                            self.callbacks.on_tool_error(tool.name, e)
+                            yield StreamEvent(
+                                event=StreamEventType.TOOL_ERROR,
+                                data={"name": tool.name, "error": str(e)},
+                                step=step,
+                            )
+                        else:
+                            self.callbacks.on_tool_end(tool.name, content)
+                            yield StreamEvent(
+                                event=StreamEventType.TOOL_END,
+                                data={"name": tool.name, "result": content},
+                                step=step,
+                            )
+
+                self.history.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": content,
+                })
+
+        # 达到最大迭代步数
+        error_msg = "已达到最大推理步数，请简化问题后重试。"
+        if self.memory:
+            self.memory.save(self.history)
+        yield StreamEvent(
+            event=StreamEventType.ERROR,
+            data=error_msg,
+            step=self.max_iterations,
+        )
 
     def invoke(self, user_message: str) -> str:
         """Runnable 协议接口，与 run() 等价。"""

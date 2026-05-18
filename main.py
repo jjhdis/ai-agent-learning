@@ -17,6 +17,7 @@ AI Agent 入口 —— 交互式对话。
     /demo-memory    运行记忆系统演示
     /demo-prompt    运行提示词模板系统演示
     /demo-parser    运行输出解析系统演示
+    /demo-stream    运行流式输出演示
 """
 
 import sys
@@ -44,6 +45,8 @@ from agent.output_parsers.json_parser import JsonOutputParser
 from agent.output_parsers.pydantic_parser import PydanticOutputParser
 from agent.output_parsers.list_parser import CommaSeparatedListOutputParser
 from agent.output_parsers.base import OutputParserException
+from agent.streaming.event import StreamEventType, StreamEvent, StreamAccumulator
+from agent.streaming.handler import StreamingCallbackHandler
 
 
 # ──────────────────────────────────────────────
@@ -526,6 +529,153 @@ def demo_output_parsers(agent_base):
     print("=" * 60)
 
 
+# ──────────────────────────────────────────────
+# 流式输出演示
+# ──────────────────────────────────────────────
+
+def demo_streaming(agent_base):
+    """演示流式输出：LLM 流式 / StreamEvent 类型 / StreamAccumulator / Agent.run_stream()。"""
+    print("\n" + "=" * 60)
+    print("流式输出演示 —— Streaming")
+    print("=" * 60)
+
+    # ── 1. LLM 流式调用基础 ──
+    print("\n" + "─" * 50)
+    print("1. LLMClient.stream_chat() —— 逐 Token 流式输出")
+    print("─" * 50)
+
+    messages = [
+        {"role": "user", "content": "用一句话介绍 Python 语言的特点（30字以内）。"}
+    ]
+    print("   [实时流式输出]:")
+    print("   ", end="", flush=True)
+    for chunk in agent_base.llm.stream_chat(messages):
+        delta = chunk.choices[0].delta
+        if delta.content:
+            print(delta.content, end="", flush=True)
+    print()
+
+    # ── 2. StreamAccumulator 使用 ──
+    print("\n" + "─" * 50)
+    print("2. StreamAccumulator —— 流式块重组为完整消息")
+    print("─" * 50)
+
+    acc = StreamAccumulator()
+    token_count = 0
+    for chunk in agent_base.llm.stream_chat(messages):
+        acc.add_chunk(chunk)
+        new_tokens = acc.new_tokens()
+        if new_tokens:
+            token_count += len(new_tokens)
+
+    print(f"   累积的完整内容 ({token_count} 字符):")
+    print(f"   \"{acc.content}\"")
+    print(f"   是否含工具调用: {acc.has_tool_calls}")
+    print(f"   是否已完成: {acc.is_done}")
+    print(f"   finish_reason: {acc.finish_reason}")
+
+    # ── 3. StreamEvent 类型 ──
+    print("\n" + "─" * 50)
+    print("3. StreamEvent 类型一览")
+    print("─" * 50)
+
+    events_demo = [
+        StreamEvent(StreamEventType.THINK, "今", step=0),
+        StreamEvent(StreamEventType.THINK, "天", step=0),
+        StreamEvent(StreamEventType.TOOL_START, {"name": "get_weather", "args": {"city": "上海"}}, step=0),
+        StreamEvent(StreamEventType.TOOL_END, {"name": "get_weather", "result": "上海晴，28°C"}, step=0),
+        StreamEvent(StreamEventType.REPLY, "上", step=1),
+        StreamEvent(StreamEventType.REPLY, "海", step=1),
+        StreamEvent(StreamEventType.DONE, "上海晴，28°C", step=1),
+    ]
+    for evt in events_demo:
+        print(f"   {evt}")
+
+    # ── 4. StreamingCallbackHandler ──
+    print("\n" + "─" * 50)
+    print("4. StreamingCallbackHandler —— 流式回调处理")
+    print("─" * 50)
+
+    handler = StreamingCallbackHandler(mode="verbose", show_thinking=False)
+    print(f"   Handler: {handler!r}")
+    for evt in events_demo:
+        handler.handle_event(evt)
+    print(f"\n   统计: tokens={handler.token_count}, tools={handler.tool_count}")
+
+    # ── 5. Agent.run_stream() 完整演示 ──
+    print("\n" + "─" * 50)
+    print("5. Agent.run_stream() —— 带工具的流式 Agent")
+    print("─" * 50)
+
+    stream_agent = build_agent()
+    print("   [流式 Agent 启动，查询上海天气...]")
+    print("   ", end="", flush=True)
+
+    handler = StreamingCallbackHandler(mode="realtime", show_thinking=False)
+    for event in stream_agent.run_stream("上海今天天气怎么样？"):
+        handler.handle_event(event)
+
+    print(f"\n   统计: tokens={handler.token_count}, tools={handler.tool_count}, "
+          f"llm_calls={handler.llm_call_count}, elapsed={handler.elapsed:.2f}s")
+
+    # ── 6. 对比 run() vs run_stream() ──
+    print("\n" + "─" * 50)
+    print("6. run() vs run_stream() 对比")
+    print("─" * 50)
+
+    print(f"   {'特性':<25} {'run()':<30} {'run_stream()':<30}")
+    print(f"   {'─'*25} {'─'*30} {'─'*30}")
+    print(f"   {'返回方式':<25} {'一次性返回完整结果':<30} {'逐 Token 流式产出':<30}")
+    print(f"   {'返回类型':<25} {'解析后的数据 (Any)':<30} {'生成器 yield StreamEvent':<30}")
+    print(f"   {'用户体验':<25} {'等待全部生成完':<30} {'实时逐字显示':<30}")
+    print(f"   {'工具调用':<25} {'内部静默执行':<30} {'产出 TOOL_START/END 事件':<30}")
+    print(f"   {'适用场景':<25} {'批处理/API 调用':<30} {'终端交互/聊天界面':<30}")
+
+    # ── 7. 流式 + 输出解析 组合演示 ──
+    print("\n" + "─" * 50)
+    print("7. 流式 + 输出解析 组合 —— run_stream() + JsonOutputParser")
+    print("─" * 50)
+
+    json_stream_agent = build_agent(
+        output_parser=JsonOutputParser(expected_keys=["city", "temperature", "condition"])
+    )
+    print("   [流式 Agent + JsonOutputParser，查询上海天气...]")
+    print("   ", end="", flush=True)
+
+    done_data = None
+    for event in json_stream_agent.run_stream(
+        "请以JSON格式告诉我上海今天的天气情况，"
+        "包含以下字段：city、temperature、condition。只输出JSON不要其他文字。"
+    ):
+        if event.event == StreamEventType.REPLY:
+            print(event.data, end="", flush=True)
+        elif event.event == StreamEventType.DONE:
+            done_data = event.data
+
+    if done_data is not None:
+        print(f"\n   DONE 事件携带的解析后数据: {done_data}")
+        print(f"   数据类型: {type(done_data).__name__}")
+        if isinstance(done_data, dict):
+            for k, v in done_data.items():
+                print(f"      {k}: {v}")
+
+    # ── 8. 流式思考过程展示 ──
+    print("\n" + "─" * 50)
+    print("8. show_thinking=True —— 显示推理过程")
+    print("─" * 50)
+
+    think_agent = build_agent()
+    think_handler = StreamingCallbackHandler(mode="realtime", show_thinking=True)
+    print("   [流式 Agent (show_thinking=True)，思考内容会以灰色 token 显示]")
+    for event in think_agent.run_stream("1+1等于几？直接回答。"):
+        think_handler.handle_event(event)
+    print()
+
+    print("\n" + "=" * 60)
+    print("流式输出演示完成！")
+    print("=" * 60)
+
+
 def main():
     memory = ConversationBufferMemory()
     memory_label = "完整记忆 (Buffer)"
@@ -535,7 +685,7 @@ def main():
     print(f"   模型: {Config.llm.model}")
     print(f"   工具: 天气查询 (get_weather)")
     print(f"   记忆: {memory_label}")
-    print(f"   输入 /quit 退出, /reset 清空, /demo-memory 演示记忆, /demo-callback 演示回调, /demo-token 演示Token计数, /demo-prompt 演示模板, /demo-parser 演示输出解析, /memory 切换记忆模式")
+    print(f"   输入 /quit 退出, /reset 清空, /demo-memory 演示记忆, /demo-callback 演示回调, /demo-token 演示Token计数, /demo-prompt 演示模板, /demo-parser 演示输出解析, /demo-stream 演示流式输出, /memory 切换记忆模式")
     print("=" * 50)
 
     agent = build_agent(memory=memory)
@@ -570,6 +720,9 @@ def main():
             continue
         if user_input.lower() == "/demo-parser":
             demo_output_parsers(agent)
+            continue
+        if user_input.lower() == "/demo-stream":
+            demo_streaming(agent)
             continue
         if user_input.lower().startswith("/memory"):
             parts = user_input.split(maxsplit=1)

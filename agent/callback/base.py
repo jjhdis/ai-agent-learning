@@ -14,7 +14,7 @@ class BaseCallbackHandler:
 
     事件分类：
         Agent 级：on_agent_start / on_agent_end / on_agent_error
-        LLM 级：  on_llm_start / on_llm_end / on_llm_error / on_think
+        LLM 级：  on_llm_start / on_llm_end / on_llm_error / on_think / on_llm_token
         Tool 级： on_tool_start / on_tool_end / on_tool_error
     """
 
@@ -42,6 +42,14 @@ class BaseCallbackHandler:
 
     def on_think(self, content: str) -> None:
         """LLM 在推理过程中输出文本内容时触发（非最终回复）。"""
+
+    def on_llm_token(self, token: str, is_final: bool = False) -> None:
+        """流式输出时，每收到一个文本 token 时触发。
+
+        Args:
+            token: 当前收到的文本 token
+            is_final: 该 token 是否属于最终回复（True）还是推理过程（False）
+        """
 
     # ---- Tool 级事件 ----
 
