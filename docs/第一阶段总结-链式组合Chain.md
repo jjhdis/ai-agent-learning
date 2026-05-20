@@ -118,97 +118,107 @@ result = travel_chain.invoke("十一假期我想出去玩")
 
 ## 3. 代码实现详解
 
-### 3.1 Runnable 协议（统一接口）
+### 3.1 组件一览
+
+| 组件 | 文件 | 一句话概括 | 核心代码 |
+|------|------|-----------|---------|
+| **Runnable** (基类) | `runnable.py` | 定义统一接口，所有组件都继承它 | `invoke(input) → output` + `__or__` |
+| **RunnableLambda** | `passthrough.py` | 把普通函数包装成 Runnable | `invoke(x) = func(x)` |
+| **RunnableMap** | `passthrough.py` | 并行执行多个 Runnable，合并为 dict | `invoke(x) = {k: r.invoke(x)}` |
+| **RunnableSequence** | `runnable.py` | 串联多个 Runnable，前一步输出=后一步输入 | `for step in steps: result = step.invoke(result)` |
+| **RunnablePassthrough** | `passthrough.py` | 原样透传，不做任何处理 | `invoke(x) = x` |
+
+### 3.2 核心机制：`|` 操作符（管道符号）
+
+`|` 之所以能自动传参，靠的是 Python 的 **`__or__` 魔术方法**。写 `a | b` 等价于调用 `a.__or__(b)`。
+
+#### ① `__or__` 做了什么？
 
 ```python
-# agent/chain/runnable.py
-class Runnable(ABC):
-    """所有可执行组件的基类。"""
-    
-    @abstractmethod
-    def invoke(self, input_data: Any) -> Any:
-        """处理输入，返回输出。"""
-        pass
-    
-    def __or__(self, other: "Runnable") -> "Runnable":
-        """实现 | 操作符，串联两个 Runnable。"""
-        return RunnableSequence(self, other)
+def __or__(self, other):
+    steps = []
+    # 如果左边已经是 RunnableSequence，展开它（避免嵌套）
+    if isinstance(self, RunnableSequence):
+        steps.extend(self.steps)
+    else:
+        steps.append(self)
+    # 右边同理
+    if isinstance(other, RunnableSequence):
+        steps.extend(other.steps)
+    else:
+        steps.append(other)
+    return RunnableSequence(steps)  # 返回一个"步骤列表"
 ```
 
-**为什么需要 Runnable？**
-- 统一接口：不管是什么组件（Lambda、Map、Passthrough），都实现 `invoke()` 方法
-- 可组合：有了统一接口，才能用 `|` 把它们串起来
+**关键设计**：检查左右两边是否已经是 `RunnableSequence`，如果是则**展开**再合并，避免产生"套娃"。
 
-### 3.2 RunnableLambda（包装普通函数）
+#### ② `a | b | c | d` 的组装过程（从左到右逐步合并）
+
+```
+第1步: a | b           → RunnableSequence([a, b])
+第2步: [a,b] | c       → RunnableSequence([a, b, c])
+第3步: [a,b,c] | d     → RunnableSequence([a, b, c, d])
+```
+
+> ⚠️ **重要理解**：`|` 只是在**组装**管道，不是在**执行**。`travel_chain = a | b | c | d` 只是创建了一个存有 4 个步骤的 `RunnableSequence` 对象，**还没有执行任何一步**。
+
+#### ③ 真正执行时：`invoke()` 依次调用
 
 ```python
-# agent/chain/passthrough.py
-class RunnableLambda(Runnable):
-    """把普通函数包装成 Runnable。"""
-    
-    def __init__(self, func: Callable[[Any], Any]):
-        self.func = func
-    
-    def invoke(self, input_data: Any) -> Any:
-        return self.func(input_data)  # 直接调用函数
+def invoke(self, input_data):
+    result = input_data
+    for step in self.steps:          # 遍历步骤列表
+        result = step.invoke(result) # ★ 上一步的输出 = 下一步的输入
+    return result
 ```
 
-**作用**：把 `analyze_preference`、`recommend_cities` 等普通函数包装成 Runnable，这样它们就能用 `|` 串联了。
+**执行追踪**（以 `travel_chain.invoke("十一假期我想出去玩")` 为例）：
 
-### 3.3 RunnableMap（并行执行）
+| 轮次 | 执行的步骤 | 输入 | 输出 |
+|------|-----------|------|------|
+| 1 | `analyze_preference` | `"十一假期我想出去玩"` | `{"preference": "自然风光", ...}` |
+| 2 | `recommend_cities` | ↑ 上一步的 dict | `{"preferences": {...}, "cities": [...]}` |
+| 3 | `check_cities_weather` | ↑ 上一步的 dict | `{"preferences": {...}, "cities": [...], "weathers": {...}}` |
+| 4 | `make_recommendation` | ↑ 上一步的 dict | `"推荐桂林和张家界..."` |
+
+**每一步的输出 dict 都在"长大"**，后面的步骤可以访问前面所有步骤产生的结果。
+
+### 3.3 生活类比：工厂生产线
+
+```
+         | 符号 = 传送带（连接工位）
+         
+  [分析偏好] ----→ [推荐城市] ----→ [查天气] ----→ [综合推荐]
+     工位1           工位2           工位3           工位4
+```
+
+- **`travel_chain = a \| b \| c \| d`** = 搭生产线，把工位用传送带连起来，机器还没开动
+- **`travel_chain.invoke(input)`** = 按下启动按钮，原料从工位1开始依次加工
+- **每个工位的输出自动掉到传送带上**，送到下一个工位的入口
+
+### 3.4 对比：不用 `|` 的手动写法
 
 ```python
-# agent/chain/passthrough.py
-class RunnableMap(Runnable):
-    """并行执行多个 Runnable，将输出合并为 dict。"""
-    
-    def __init__(self, mapping: dict[str, Runnable]):
-        self.mapping = mapping
-    
-    def invoke(self, input_data: Any) -> dict[str, Any]:
-        return {key: r.invoke(input_data) for key, r in self.mapping.items()}
+# ❌ 手动串联（繁琐、难维护）
+result1 = analyze_preference("十一假期我想出去玩")
+result2 = recommend_cities(result1)
+result3 = check_cities_weather(result2)
+result4 = make_recommendation(result3)
+
+# ✅ 用 | 串联（简洁、可复用）
+travel_chain = (
+    RunnableLambda(analyze_preference)
+    | RunnableLambda(recommend_cities)
+    | RunnableLambda(check_cities_weather)
+    | RunnableLambda(make_recommendation)
+)
+result = travel_chain.invoke("十一假期我想出去玩")
 ```
 
-**作用**：同时查多个城市的天气。比如：
-```python
-RunnableMap({
-    "稻城亚丁": RunnableLambda(lambda _: "稻城亚丁 10月天气：..."),
-    "桂林": RunnableLambda(lambda _: "桂林 10月天气：..."),
-    "张家界": RunnableLambda(lambda _: "张家界 10月天气：..."),
-}).invoke(None)
-# 返回: {"稻城亚丁": "...", "桂林": "...", "张家界": "..."}
-```
-
-### 3.4 RunnableSequence（串联管道）
-
-```python
-# agent/chain/runnable.py
-class RunnableSequence(Runnable):
-    """串联多个 Runnable，前一个的输出是后一个的输入。"""
-    
-    def __init__(self, *steps: Runnable):
-        self.steps = steps
-    
-    def invoke(self, input_data: Any) -> Any:
-        result = input_data
-        for step in self.steps:
-            result = step.invoke(result)  # ★ 关键：前一步输出传给后一步
-        return result
-```
-
-**这就是管道的核心实现！** 一个简单的 `for` 循环，把每一步的输出传给下一步。
-
-### 3.5 `|` 操作符
-
-```python
-# agent/chain/runnable.py
-class Runnable(ABC):
-    def __or__(self, other: "Runnable") -> "RunnableSequence":
-        return RunnableSequence(self, other)
-```
-
-所以 `a | b | c | d` 等价于 `RunnableSequence(a, b, c, d)`。
-
+**管道的优势**：
+1. **可复用**：定义一次 `travel_chain`，可以多次调用 `.invoke()` 传入不同输入
+2. **可组合**：可以随时在中间插入/删除步骤，不需要改调用代码
+3. **可观察**：可以给 `RunnableSequence` 加日志，追踪每一步的输入输出
 ---
 
 ## 4. 运行效果

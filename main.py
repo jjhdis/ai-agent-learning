@@ -47,6 +47,7 @@ from agent.output_parsers.list_parser import CommaSeparatedListOutputParser
 from agent.output_parsers.base import OutputParserException
 from agent.streaming.event import StreamEventType, StreamEvent, StreamAccumulator
 from agent.streaming.handler import StreamingCallbackHandler
+from agent.rag.retriever import RetrieverTool
 
 
 # ──────────────────────────────────────────────
@@ -71,6 +72,241 @@ def build_agent(memory=None, callbacks=None, output_parser=None):
         callbacks=callbacks,
         output_parser=output_parser,
     )
+
+
+# ──────────────────────────────────────────────
+# RAG 演示
+# ──────────────────────────────────────────────
+
+def demo_rag(agent_base):
+    """演示 RAG (检索增强生成) 完整管道:
+    Document → Splitter → Embedding → VectorStore → RetrieverTool → Agent 调用。
+    """
+    print("\n" + "=" * 60)
+    print("RAG 演示 —— 检索增强生成 (Retrieval-Augmented Generation)")
+    print("=" * 60)
+
+    # ── 1. 准备知识库文档 ──
+    print("\n" + "─" * 50)
+    print("1. 准备知识库文档 —— 构建 Python 知识点文档集")
+    print("─" * 50)
+
+    knowledge_texts = [
+        # Python 基础
+        (
+            "Python 由 Guido van Rossum 于 1991 年首次发布。"
+            "它是一种解释型、高级、通用型编程语言，设计哲学强调代码可读性和简洁的语法。"
+            "Python 支持多种编程范式，包括面向对象、命令式、函数式和过程式编程。"
+            "Python 使用缩进而不是大括号来划分代码块，这使得代码更加整洁一致。"
+            "Python 是动态类型语言，变量在赋值时自动确定类型，无需显式声明。"
+        ),
+        # GIL
+        (
+            "GIL (Global Interpreter Lock，全局解释器锁) 是 CPython 中的一种互斥锁。"
+            "它确保同一时刻只有一个线程在执行 Python 字节码。"
+            "GIL 的存在简化了 CPython 的内存管理（特别是引用计数），但也限制了多线程在 CPU 密集型任务上的性能。"
+            "对于 I/O 密集型任务（如网络请求、文件读写），GIL 的影响较小，因为线程在等待 I/O 时会释放 GIL。"
+            "要绕过 GIL 的限制，可以使用多进程（multiprocessing 模块）或异步编程（asyncio）。"
+            "其他 Python 实现（如 Jython、IronPython）没有 GIL。"
+            "Python 3.13 引入了 PEP 703，计划在未来版本中移除 GIL。"
+        ),
+        # 装饰器
+        (
+            "装饰器 (Decorator) 是 Python 中一种强大的设计模式，本质上是接受函数作为参数并返回新函数的高阶函数。"
+            "使用 @decorator_name 语法糖可以简洁地将装饰器应用于函数或类。"
+            "常见的装饰器有 @staticmethod、@classmethod、@property、@functools.lru_cache 等。"
+            "装饰器可以用于日志记录、性能计时、权限校验、缓存、路由注册等场景。"
+            "多个装饰器可以叠加使用，执行顺序是从下往上（靠近函数定义的先执行）。"
+            "functools.wraps 装饰器用于保留原函数的元数据（如 __name__、__doc__）。"
+        ),
+        # 生成器
+        (
+            "生成器 (Generator) 是一种使用 yield 关键字的特殊迭代器。"
+            "与普通函数不同，生成器在执行到 yield 语句时会暂停并保存当前状态，下次调用时从暂停处继续执行。"
+            "生成器是惰性求值的，只在需要时才产生值，这使得它们非常内存友好，特别适合处理大型数据集。"
+            "生成器表达式 (generator expression) 使用类似列表推导式的语法但用圆括号，如 (x**2 for x in range(10))。"
+            "yield from 语句可以将一个生成器的所有值委托给另一个生成器。"
+            "生成器常用于数据流处理、无限序列生成、协程等场景。"
+        ),
+        # asyncio
+        (
+            "asyncio 是 Python 3.4+ 引入的标准库，用于编写单线程并发代码。"
+            "它基于事件循环 (event loop)，使用 async/await 语法定义协程 (coroutine)。"
+            "await 关键字用于暂停当前协程的执行，等待另一个协程或 Future 对象完成。"
+            "asyncio.gather() 可以并发运行多个协程并收集结果。"
+            "asyncio 特别适合网络编程、Web 服务等高 I/O 并发场景。"
+            "与多线程相比，asyncio 避免了线程切换开销和 GIL 竞争，但需要所有 I/O 操作都是非阻塞的。"
+            "Python 3.11+ 引入了 asyncio.TaskGroup() 提供更好的任务管理。"
+        ),
+        # 类型提示
+        (
+            "Python 3.5+ 引入了类型提示 (Type Hints)，允许在代码中标注变量、函数参数和返回值的类型。"
+            "类型提示是可选的，不会影响运行时行为，但可以被 IDE、类型检查器（如 mypy、pyright）和文档工具使用。"
+            "typing 模块提供了丰富类型: List、Dict、Optional、Union、Callable、Protocol、TypedDict 等。"
+            "Python 3.9+ 可以直接使用 list[int]、dict[str, int] 替代 typing.List[int] 等。"
+            "Python 3.10+ 引入了 | 联合类型语法: int | None 替代 Optional[int]。"
+            "Python 3.12+ 引入了类型参数语法的简化: def foo[T](x: T) -> T。"
+        ),
+        # pip
+        (
+            "pip 是 Python 的官方包管理工具，用于从 PyPI (Python Package Index) 安装和管理第三方库。"
+            "常用命令: pip install package、pip uninstall package、pip list、pip freeze > requirements.txt、pip install -r requirements.txt。"
+            "pip 支持版本约束: pip install package==1.0.0、pip install 'package>=2.0,<3.0'。"
+            "虚拟环境 (venv/virtualenv) 为每个项目创建独立的包环境，避免依赖冲突。"
+            "Python 3.4+ 内置 venv 模块: python -m venv .venv。"
+        ),
+        # 列表推导式
+        (
+            "列表推导式 (List Comprehension) 是 Python 中创建列表的简洁语法。"
+            "基本格式: [expression for item in iterable if condition]。"
+            "列表推导式通常比等效的 for 循环更快，因为它们在 C 层面执行。"
+            "字典推导式和集合推导式也使用类似的语法: {k: v for k, v in ...}、{x for x in ...}。"
+            "嵌套推导式虽然强大但可读性可能下降，复杂逻辑建议改用传统循环。"
+        ),
+    ]
+
+    metadatas = [
+        {"topic": "Python 基础", "category": "语言概述"},
+        {"topic": "GIL", "category": "并发"},
+        {"topic": "装饰器", "category": "高级特性"},
+        {"topic": "生成器", "category": "迭代器与生成器"},
+        {"topic": "asyncio", "category": "并发"},
+        {"topic": "类型提示", "category": "语言特性"},
+        {"topic": "pip", "category": "工具与生态"},
+        {"topic": "列表推导式", "category": "基础语法"},
+    ]
+
+    print(f"   知识库文档数: {len(knowledge_texts)} 篇")
+    for text, meta in zip(knowledge_texts, metadatas):
+        topic = meta["topic"]
+        preview = text[:40]
+        print(f"     📄 {topic}: {preview}…")
+
+    # ── 2. 分割文档 ──
+    print("\n" + "─" * 50)
+    print("2. 文档分割 —— RecursiveCharacterTextSplitter")
+    print("─" * 50)
+
+    from agent.rag.splitter import RecursiveCharacterTextSplitter
+    from agent.rag.document import Document
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=300, overlap_size=50)
+    docs = []
+    for i, text in enumerate(knowledge_texts):
+        docs.append(Document(content=text, metadata=metadatas[i]))
+    chunks = splitter.split_documents(docs)
+    print(f"   分割前: {len(docs)} 篇文档")
+    print(f"   分割后: {len(chunks)} 个片段")
+    print(f"   chunk_size={splitter.chunk_size}, overlap_size={splitter.overlap_size}")
+    for i, chunk in enumerate(chunks[:5]):
+        print(f"   块 {i}: len={len(chunk.content)}, topic={chunk.metadata.get('topic', '?')}, preview={chunk.content[:50]}…")
+    if len(chunks) > 5:
+        print(f"   … 其余 {len(chunks) - 5} 个片段省略")
+
+    # ── 3. Embedding 与向量存储 ──
+    print("\n" + "─" * 50)
+    print("3. 向量化与存储 —— InMemoryVectorStore + OpenAIEmbeddings")
+    print("─" * 50)
+
+    from agent.rag.store import InMemoryVectorStore
+    from agent.rag.embedding import OpenAIEmbeddings
+
+    try:
+        embedding = OpenAIEmbeddings()
+        print(f"   模型: {embedding.model}")
+        # 用一句话测试 Embedding API 连通性
+        test_vec = embedding.embed_query("测试")
+        print(f"   向量维度: {len(test_vec)}")
+        print(f"   前 5 维: {[round(v, 4) for v in test_vec[:5]]}")
+        embedding_ok = True
+    except Exception as e:
+        print(f"   [警告] Embedding API 不可用: {e}")
+        print(f"   [降级] 切回本地关键词匹配模式 (SimpleEmbeddings)")
+        from agent.rag.embedding import SimpleEmbeddings
+        embedding = SimpleEmbeddings()
+        embedding_ok = False
+
+    store = InMemoryVectorStore(embedding=embedding)
+    store.add_documents(chunks)
+    print(f"   存储文档块数: {store.document_count}")
+
+    # ── 4. 创建 RetrieverTool 并注册 ──
+    print("\n" + "─" * 50)
+    print("4. RetrieverTool —— 封装为 Agent 可调用的工具")
+    print("─" * 50)
+
+    retriever = RetrieverTool()
+    retriever.add_documents(docs)  # 重做一遍（RetrieverTool 内部有 splitter）
+    print(f"   工具名: {retriever.name}")
+    print(f"   参数: {[p.name for p in retriever.parameters]}")
+    print(f"   知识库文档块数: {retriever.document_count}")
+    print(f"   OpenAI 函数定义：")
+    fn_def = retriever.to_openai_function()
+    print(f"     name: {fn_def['function']['name']}")
+    print(f"     description: {fn_def['function']['description'][:60]}…")
+    print(f"     parameters: {list(fn_def['function']['parameters']['properties'].keys())}")
+
+    # ── 5. 直接检索测试 ──
+    print("\n" + "─" * 50)
+    print("5. 直接检索测试 —— 不通过 Agent")
+    print("─" * 50)
+
+    test_queries = [
+        "Python 是什么时候发布的？",
+        "GIL 是什么意思？",
+        "装饰器有什么用途？",
+        "asyncio 怎么使用？",
+        "列表推导式语法是什么？",
+    ]
+
+    for query in test_queries:
+        result = retriever.execute(query)
+        # 只展示第一条结果的摘要
+        first_line = result.split("\n")[0] if result else "无结果"
+        print(f"\n   查询: {query}")
+        print(f"   {first_line}")
+
+    # ── 6. Agent 集成演示 ──
+    print("\n" + "─" * 50)
+    print("6. Agent 集成 —— Agent 通过 function calling 使用知识库")
+    print("─" * 50)
+
+    registry = agent_base.registry.__class__()
+    registry.register(retriever)
+
+    from agent.core.agent import Agent
+    from agent.llm.client import LLMClient
+    from config import Config
+
+    rag_agent = Agent(
+        llm_client=LLMClient(Config.llm),
+        registry=registry,
+        hooks={
+            "on_start": lambda msg: print(f"\n   [Agent 开始]: {msg}"),
+            "on_tool_call": lambda name, args: print(f"   [Tool 调用]: {name}({args})"),
+            "on_reply": lambda msg: print(f"   [Agent 回复]: {msg}"),
+        },
+    )
+
+    questions = [
+        "什么是 GIL？它对 Python 多线程有什么影响？",
+        "Python 的装饰器是什么？请根据知识库内容回答。",
+    ]
+
+    for question in questions:
+        print(f"\n   用户提问: {question}")
+        try:
+            answer = rag_agent.run(question)
+            if isinstance(answer, str):
+                print(f"\n   [最终回复]: {answer[:200]}…" if len(answer) > 200 else f"\n   [最终回复]: {answer}")
+            else:
+                print(f"\n   [最终回复]: {answer}")
+        except Exception as e:
+            print(f"   [Agent 错误]: {e}")
+
+    print("\n" + "=" * 60)
+    print("RAG 演示完成！")
+    print("=" * 60)
 
 
 # ──────────────────────────────────────────────
@@ -685,7 +921,7 @@ def main():
     print(f"   模型: {Config.llm.model}")
     print(f"   工具: 天气查询 (get_weather)")
     print(f"   记忆: {memory_label}")
-    print(f"   输入 /quit 退出, /reset 清空, /demo-memory 演示记忆, /demo-callback 演示回调, /demo-token 演示Token计数, /demo-prompt 演示模板, /demo-parser 演示输出解析, /demo-stream 演示流式输出, /memory 切换记忆模式")
+    print(f"   输入 /quit 退出, /reset 清空, /demo-memory 演示记忆, /demo-callback 演示回调, /demo-token 演示Token计数, /demo-prompt 演示模板, /demo-parser 演示输出解析, /demo-stream 演示流式输出, /demo-rag 演示RAG知识检索, /memory 切换记忆模式")
     print("=" * 50)
 
     agent = build_agent(memory=memory)
@@ -723,6 +959,9 @@ def main():
             continue
         if user_input.lower() == "/demo-stream":
             demo_streaming(agent)
+            continue
+        if user_input.lower() == "/demo-rag":
+            demo_rag(agent)
             continue
         if user_input.lower().startswith("/memory"):
             parts = user_input.split(maxsplit=1)

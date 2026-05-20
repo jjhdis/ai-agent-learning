@@ -32,5 +32,20 @@ class LLMConfig:
         self.max_tokens = max_tokens
 
 
+class EmbeddingConfig:
+    """Embedding 配置，使用智谱 GLM 的 embedding-2 模型。"""
+
+    def __init__(
+        self,
+        api_key: str = None,
+        base_url: str = None,
+        model: str = None,
+    ):
+        self.api_key = api_key or "52e2eb2742f145fe8e7eca23104f61fd.SuPwNvcdhNj41dny"
+        self.base_url = base_url or "https://open.bigmodel.cn/api/paas/v4"
+        self.model = model or "embedding-2"
+
+
 class Config:
     llm = LLMConfig()
+    embedding = EmbeddingConfig()

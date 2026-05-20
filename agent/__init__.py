@@ -25,6 +25,11 @@ from agent.output_parsers.pydantic_parser import PydanticOutputParser
 from agent.output_parsers.list_parser import CommaSeparatedListOutputParser
 from agent.streaming.event import StreamEventType, StreamEvent, StreamAccumulator
 from agent.streaming.handler import StreamingCallbackHandler
+from agent.rag.document import Document, TextLoader, TextFileLoader
+from agent.rag.splitter import RecursiveCharacterTextSplitter
+from agent.rag.embedding import OpenAIEmbeddings, SimpleEmbeddings
+from agent.rag.store import InMemoryVectorStore
+from agent.rag.retriever import RetrieverTool
 
 __all__ = [
     "Agent", "ToolRegistry", "BaseTool", "ToolParameter",
@@ -36,4 +41,10 @@ __all__ = [
     "BaseOutputParser", "OutputParserException",
     "StrOutputParser", "JsonOutputParser", "PydanticOutputParser", "CommaSeparatedListOutputParser",
     "StreamEventType", "StreamEvent", "StreamAccumulator", "StreamingCallbackHandler",
+    "Document", "TextLoader", "TextFileLoader",
+    "RecursiveCharacterTextSplitter",
+    "OpenAIEmbeddings",
+    "SimpleEmbeddings",
+    "InMemoryVectorStore",
+    "RetrieverTool",
 ]
